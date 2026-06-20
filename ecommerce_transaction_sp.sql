@@ -1,0 +1,373 @@
+CREATE OR REPLACE PROCEDURE dwh.generate_ecommerce_transaction()
+ LANGUAGE plpgsql
+AS $procedure$
+BEGIN
+    -- Step 1: Load Data into Staging (stg)
+    CREATE TABLE IF NOT EXISTS stg.stg_ecommerce_transaction AS 
+    SELECT *, CURRENT_TIMESTAMP AS last_update FROM public.ecommerce_transaction; 
+    TRUNCATE TABLE stg.stg_ecommerce_transaction;
+    INSERT INTO stg.stg_ecommerce_transaction 
+    SELECT *, CURRENT_TIMESTAMP AS last_update FROM public.ecommerce_transaction;
+
+    -- Step 2: Load Data into Dim_Product
+    CREATE TABLE IF NOT EXISTS dwh.dim_ecommerce_product (
+        product_id INT PRIMARY KEY,
+        product_name VARCHAR(255),
+        product_category VARCHAR(50),
+        product_price FLOAT4,
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    TRUNCATE TABLE dwh.dim_ecommerce_product;
+    INSERT INTO dwh.dim_ecommerce_product (product_id, product_name, product_category, product_price, last_update)
+    SELECT src.product_id, src.product_name, src.product_category, src.product_price, CURRENT_TIMESTAMP
+    FROM stg.stg_ecommerce_transaction AS src
+    GROUP BY src.product_id, src.product_name, src.product_category, src.product_price;
+
+    -- Step 3: Load Data into Dim_Store
+    CREATE TABLE IF NOT EXISTS dwh.dim_ecommerce_store (
+        store_id INT PRIMARY KEY,
+        store_name VARCHAR(255),
+        store_phone VARCHAR(50),
+        store_city VARCHAR(50),
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    TRUNCATE TABLE dwh.dim_ecommerce_store;
+    INSERT INTO dwh.dim_ecommerce_store (store_id, store_name, store_phone, store_city, last_update)
+    SELECT src.store_id, src.store_name, src.store_phone, src.store_city, CURRENT_TIMESTAMP
+    FROM stg.stg_ecommerce_transaction AS src
+    GROUP BY src.store_id, src.store_name, src.store_phone, src.store_city; 
+
+    -- Step 4: Load Data into Dim_User
+    CREATE TABLE IF NOT EXISTS dwh.dim_ecommerce_user (
+        user_id INT PRIMARY KEY,
+        user_name VARCHAR(255),
+        user_email VARCHAR(255),
+        user_phone VARCHAR(50),
+        user_gender VARCHAR(50),
+        user_age INT,
+        user_city VARCHAR(50),
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    TRUNCATE TABLE dwh.dim_ecommerce_user;
+    INSERT INTO dwh.dim_ecommerce_user (user_id, user_name, user_email, user_phone, user_gender, user_age, user_city, last_update)
+    SELECT src.user_id, src.user_name, src.user_email, src.user_phone, src.user_gender, src.user_age, src.user_city, CURRENT_TIMESTAMP
+    FROM stg.stg_ecommerce_transaction AS src
+    GROUP BY src.user_id, src.user_name, src.user_email, src.user_phone, src.user_gender, src.user_age, src.user_city;  
+
+    -- Step 5: Load Data into Fact_Sales
+    CREATE TABLE IF NOT EXISTS dwh.fact_ecommerce_transaction (
+        sale_id INT PRIMARY KEY,
+        transaction_date DATE,
+        transaction_time TIME,
+        store_id INT,
+        user_id INT,
+        product_id INT,
+        quantity INT,
+        total_price FLOAT,
+        payment_method VARCHAR(50),
+        transaction_status VARCHAR(50),
+        shipping_method VARCHAR(50),
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO dwh.fact_ecommerce_transaction (sale_id, transaction_date, transaction_time, store_id, user_id, product_id, quantity, total_price, payment_method, transaction_status, shipping_method, last_update)
+    SELECT
+        src.transaction_id AS sale_id,
+        src.transaction_time::DATE AS transaction_date,
+        src.transaction_time::TIME AS transaction_time,
+        src.store_id,
+        src.user_id,
+        src.product_id,
+        src.quantity,
+        src.total_price,
+        src.payment_method,
+        src.transaction_status,
+        src.shipping_method,
+        CURRENT_TIMESTAMP AS last_update
+    FROM stg.stg_ecommerce_transaction AS src
+    WHERE NOT EXISTS (
+        SELECT 1 FROM dwh.fact_ecommerce_transaction AS fact
+        WHERE fact.sale_id = src.transaction_id
+    );
+
+    -- Step 6: Create Data Mart View (vw_dm_cube_ecommerce_transaction)
+    CREATE OR REPLACE VIEW dm.vw_dm_cube_ecommerce_transaction AS 
+    SELECT 
+        fs.sale_id,
+        fs.transaction_date,
+        fs.transaction_time,
+        fs.store_id,
+        ds.store_name,
+        ds.store_city,
+        fs.user_id,
+        du.user_name,
+        du.user_city,
+        fs.product_id,
+        dp.product_name,
+        dp.product_category,
+        dp.product_price,
+        fs.quantity,
+        fs.total_price,
+        fs.payment_method,
+        fs.transaction_status,
+        fs.shipping_method,
+        fs.last_update
+    FROM 
+        dwh.fact_ecommerce_transaction fs
+    LEFT JOIN 
+        dwh.dim_ecommerce_store ds ON fs.store_id = ds.store_id
+    LEFT JOIN 
+        dwh.dim_ecommerce_user du ON fs.user_id = du.user_id
+    LEFT JOIN 
+        dwh.dim_ecommerce_product dp ON fs.product_id = dp.product_id;
+
+    -- Step 7: Create Data Mart Cube Table
+    CREATE TABLE IF NOT EXISTS dm.dm_cube_ecommerce_transaction (
+        sale_id INT,
+        transaction_date DATE,
+        transaction_time TIME,
+        store_id INT,
+        store_name VARCHAR(255),
+        store_city VARCHAR(50),
+        user_id INT,
+        user_name VARCHAR(255),
+        user_city VARCHAR(50),
+        product_id INT,
+        product_name VARCHAR(255),
+        product_category VARCHAR(50),
+        product_price FLOAT4,
+        quantity INT,
+        total_price FLOAT,
+        payment_method VARCHAR(50),
+        transaction_status VARCHAR(50),
+        shipping_method VARCHAR(50),
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) PARTITION BY RANGE (transaction_date);
+
+    -- Step 8: Create Daily Partitions (2025-01-01 to 2025-03-28)
+    DO $$ 
+    DECLARE d DATE := '2025-01-01'; 
+    BEGIN 
+        WHILE d <= '2025-03-28' LOOP 
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS dm.dm_cube_ecommerce_transaction_%s
+                PARTITION OF dm.dm_cube_ecommerce_transaction 
+                FOR VALUES FROM (%L) TO (%L);',
+                to_char(d, 'YYYYMMDD'), d, d + INTERVAL '1 day'
+            );
+            d := d + INTERVAL '1 day';
+        END LOOP; 
+    END $$;
+
+    -- Step 9: Refresh Data in Data Mart Cube Table
+    TRUNCATE TABLE dm.dm_cube_ecommerce_transaction;
+    INSERT INTO dm.dm_cube_ecommerce_transaction (sale_id, transaction_date, transaction_time, store_id, store_name, store_city, 
+                                                   user_id, user_name, user_city, product_id, product_name, product_category,
+                                                   product_price, quantity, total_price, payment_method, transaction_status,
+                                                   shipping_method, last_update)
+    SELECT 
+        sale_id, 
+        transaction_date,
+        transaction_time, 
+        store_id, 
+        store_name, 
+        store_city, 
+        user_id, 
+        user_name, 
+        user_city, 
+        product_id, 
+        product_name, 
+        product_category, 
+        product_price, 
+        quantity, 
+        total_price, 
+        payment_method, 
+        transaction_status, 
+        shipping_method, 
+        last_update
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY sale_id ORDER BY last_update DESC) AS flag_unique
+        FROM dm.vw_dm_cube_ecommerce_transaction
+    ) AS ranked_data
+    WHERE flag_unique = 1;
+
+    -- Step 10: Refresh Data in Most Transactions by Date Data Mart
+    -- Automation: Create Table
+	CREATE TABLE IF NOT EXISTS dm.dm_most_transaction_date AS
+	SELECT transaction_date, COUNT(*) AS total_transactions, CURRENT_TIMESTAMP AS last_update
+    FROM dm.dm_cube_ecommerce_transaction
+    GROUP BY transaction_date
+    ORDER BY total_transactions DESC;
+	
+    -- Automation: Truncate --> SCD Type 1
+    TRUNCATE TABLE dm.dm_most_transaction_date;
+	
+    -- Automation: Inserting New Data
+    INSERT INTO dm.dm_most_transaction_date 
+    SELECT transaction_date, COUNT(*) AS total_transactions,CURRENT_TIMESTAMP AS last_update
+    FROM dm.dm_cube_ecommerce_transaction
+    GROUP BY transaction_date
+    ORDER BY total_transactions DESC;
+-- cek data
+--SELECT column_name, data_type
+--FROM information_schema.columns
+--WHERE table_schema = 'dm'
+--AND table_name = 'dm_cube_ecommerce_transaction';
+
+    -- Step 11: Total Transaction and Total User per hour
+	-- Automation: Create Table
+	create table if not exists dm.dm_transaction_user_hour(
+		transaction_hour int,
+		total_transactions int,
+		total_users int,
+		last_update timestamp default current_timestamp
+	);
+	-- Automation: Truncate --> SCD Type 1
+    truncate table dm.dm_transaction_user_hour;
+	-- Automation: Inserting New Data
+    insert into dm.dm_transaction_user_hour (
+		transaction_hour,
+		total_transactions,
+		total_users,
+		last_update
+	)
+	select 
+		extract(hour from transaction_time)::int as transaction_hour,
+		count(sale_id) as total_transactions,
+		count(distinct user_id) as total_users,
+		current_timestamp
+	from dm.dm_cube_ecommerce_transaction
+	group by extract(hour from transaction_time)
+	order by transaction_hour;
+
+--melihat data berdasarkan jam transaksi
+--SELECT *
+--FROM dm.dm_transaction_user_hour
+--ORDER BY transaction_hour;
+
+    -- Step 12: Total Quantity by Product ID
+	-- Automation: Create Table
+create table if not exists dm.dm_quantity_product(
+		product_id int,
+		product_name varchar(255),
+		total_quantity int,
+		last_update timestamp default current_timestamp
+	);
+	-- Automation: Truncate --> SCD Type 1
+    truncate table dm.dm_quantity_product;
+
+	-- Automation: Inserting New Data
+    insert into dm.dm_quantity_product (
+		product_id,
+		product_name,
+		total_quantity,
+		last_update
+	)
+	select 
+		product_id,
+		product_name,
+		sum(quantity) as total_quantity,
+		current_timestamp
+	from dm.dm_cube_ecommerce_transaction
+	group by
+		product_id,
+		product_name
+	order by total_quantity desc;
+
+--melihat product terlaris 
+--SELECT *
+--FROM dm.dm_quantity_product
+--ORDER BY total_quantity DESC
+--LIMIT 10;
+
+
+    -- Step 13: Total Quantity by  Store ID 
+	-- Automation: Create Table
+create table if not exists dm.dm_quantity_store(
+		store_id int,
+		store_name varchar(255),
+		total_quantity int,
+		last_update timestamp default current_timestamp
+	);
+	-- Automation: Truncate --> SCD Type 1
+    truncate table dm.dm_quantity_store;
+
+	-- Automation: Inserting New Data
+    insert into dm.dm_quantity_store (
+		store_id,
+		store_name,
+		total_quantity,
+		last_update
+	)
+	select 
+		store_id,
+		store_name,
+		sum(quantity) as total_quantity,
+		current_timestamp
+	from dm.dm_cube_ecommerce_transaction
+	group by
+		store_id,
+		store_name
+	order by total_quantity desc;
+
+--melihat product terlaris berdasarkan store
+--SELECT *
+--FROM dm.dm_quantity_store
+--ORDER BY total_quantity DESC
+--LIMIT 10;
+
+    -- Step 14: Additional DM (rename to your datamart)
+	-- Automation: Create Table
+	create table if not exists dm.dm_product_category(
+		product_category varchar(50),
+		total_transactions int,
+		total_quantity int,
+		total_revenue float,
+		last_update timestamp default current_timestamp
+	);
+	-- Automation: Truncate --> SCD Type 1
+    truncate table dm.dm_product_category;
+
+	-- Automation: Inserting New Data
+    insert into dm.dm_product_category (
+		product_category,
+		total_transactions,
+		total_quantity,
+		total_revenue,
+		last_update 
+	)
+	select 
+		product_category,
+		count(sale_id) as total_transactions,
+		sum(quantity) as total_quantity,
+		sum(total_price) as total_revenue,
+		current_timestamp
+	from dm.dm_cube_ecommerce_transaction
+	group by product_category
+	order by total_revenue desc;
+
+-- cek kategori
+--SELECT *
+--FROM dm.dm_product_category
+--ORDER BY total_revenue DESC;
+END;
+$procedure$
+;
+
+
+call dwh.generate_ecommerce_transaction();
+
+select count(*) from dm.dm_transaction_user_hour;
+select count(*) from dm.dm_quantity_product;
+select count(*) from dm.dm_quantity_store;
+select count(*) from dm.dm_product_category;
+
+
+
+
+
+
+
+
+
+
+
