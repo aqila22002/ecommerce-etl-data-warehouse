@@ -1,11 +1,10 @@
-# ecommerce-etl-data-warehouse
-ETL Data Warehouse Project using PostgreSQL, Stored Procedure, Partitioning, and Data Mart
+# E-Commerce ETL Data Warehouse Project
 
 ## Overview
 
-This project demonstrates an end-to-end ETL process using PostgreSQL.
+This project demonstrates the implementation of an end-to-end ETL (Extract, Transform, Load) process using PostgreSQL for an e-commerce transaction dataset.
 
-The project includes:
+The project covers:
 
 - Staging Layer
 - Dimension Tables
@@ -16,58 +15,139 @@ The project includes:
 
 ---
 
-## Architecture
+## Data Warehouse Architecture
 
+```text
 Source Data
-↓
+    ↓
 Staging
-↓
+    ↓
 Dimension Tables
-↓
+    ↓
 Fact Table
-↓
+    ↓
 View
-↓
+    ↓
 Cube
-↓
+    ↓
 Data Mart
+```
 
 ---
 
-## Data Marts
+## ETL Process
 
-### Transaction User Hour
+### Extract
 
-- Total transactions per hour
-- Total users per hour
+Data is extracted from the source table:
 
-### Quantity Product
+```sql
+public.ecommerce_transaction
+```
 
-- Top selling products
+and loaded into:
 
-### Quantity Store
+```sql
+stg.stg_ecommerce_transaction
+```
 
-- Top performing stores
+### Transform
 
-### Product Category Revenue
+Data is transformed into:
 
-- Revenue by product category
+- dim_ecommerce_product
+- dim_ecommerce_store
+- dim_ecommerce_user
+- fact_ecommerce_transaction
+
+### Load
+
+The transformed data is loaded into analytical Data Marts.
 
 ---
 
-## Technologies
+## Stored Procedure Automation
+
+The entire ETL process is automated using:
+
+```sql
+CALL dwh.generate_ecommerce_transaction();
+```
+
+### Stored Procedure
+
+![Stored Procedure](stored_procedured.png)
+
+### Run Stored Procedure
+
+![Run Stored Procedure](run_stored_procedure.png)
+
+---
+
+## Partitioning
+
+Range Partitioning is implemented on:
+
+```sql
+dm.dm_cube_ecommerce_transaction
+```
+
+using:
+
+```sql
+PARTITION BY RANGE(transaction_date)
+```
+
+This improves query performance and data management for large datasets.
+
+---
+
+## Data Mart Results
+
+### 1. Transaction per Hour
+
+Monitor total transactions and total users per hour.
+
+![Transaction User Hour](transaction_user.png)
+
+---
+
+### 2. Product Quantity
+
+Monitor best-selling products.
+
+![Product Quantity](product_quantity.png)
+
+---
+
+### 3. Store Quantity
+
+Monitor top-performing stores.
+
+![Store Quantity](product_store.png)
+
+---
+
+### 4. Revenue by Product Category
+
+Monitor revenue contribution by product category.
+
+![Product Category Revenue](product_category.png)
+
+---
+
+## Technologies Used
 
 - PostgreSQL
 - SQL
-- Data Warehouse
 - ETL
+- Data Warehouse
+- Data Mart
 - Stored Procedure
 - Partitioning
 
 ---
 
-## Run Procedure
+## Project Outcome
 
-```sql
-CALL dwh.generate_ecommerce_transaction();
-```
+The ETL process successfully transformed raw transaction data into a structured Data Warehouse and Data Mart environment. The implementation of Stored Procedures automated the refresh process, while Partitioning improved scalability and query efficiency.
